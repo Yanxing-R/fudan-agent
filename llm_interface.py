@@ -4,7 +4,7 @@ import os
 import json
 import dashscope # 确认导入了正确的库
 from dashscope.api_entities.dashscope_response import GenerationResponse # 导入可能的响应类型，具体看文档
-from prompts import NLU_PROMPT_TEMPLATE # 你的 Prompt 模板保持不变
+from prompts import NLU_PROMPT_TEMPLATE, GENERAL_CHAT_PROMPT_TEMPLATE # 你的 Prompt 模板保持不变
 
 # --- 配置 API Key ---
 # 从环境变量读取 API Key
@@ -97,3 +97,57 @@ def get_llm_nlu(user_input):
         # 处理调用过程中的其他异常 (网络问题、SDK 本身问题等)
         print(f"An unexpected error occurred calling DashScope API: {e}")
         return {"intent": "error", "entities": {"message": "Failed to call LLM API"}}
+
+# --- 新增: 通用对话回复函数 ---
+def get_general_response(user_input):
+    """
+    调用 LLM 进行通用的对话式回复。
+
+    Args:
+        user_input (str): 用户的原始输入文本。
+
+    Returns:
+        str: LLM 生成的回复文本，如果出错则返回 None 或错误提示。
+    """
+    if not dashscope.api_key:
+        print("错误：General Chat - API Key 未配置。")
+        return "抱歉，我的配置好像有点问题，暂时无法回复。" # 返回用户友好的错误
+
+    # 使用新的通用对话 Prompt
+    prompt = GENERAL_CHAT_PROMPT_TEMPLATE.format(user_input=user_input)
+
+    try:
+        print(f"--- Debug General Chat: Sending request ---")
+        # print(f"Model: {ALI_MODEL_NAME}") # Debug 时可以取消注释
+        # print(f"Prompt:\n{prompt}") # Debug 时可以取消注释
+
+        # 调用 DashScope API (类似 NLU，但使用不同 Prompt)
+        response = dashscope.Generation.call(
+            model=ALI_MODEL_NAME,
+            prompt=prompt,
+            result_format='message' # 期望返回 message 结构
+            # 可以考虑设置 temperature 等参数让回复更多样性，例如: temperature=0.7
+        )
+
+        print(f"--- Debug General Chat: Received response ---")
+
+        if response.status_code == 200:
+            # 直接获取 LLM 生成的文本内容
+            generated_text = response.output.choices[0]['message']['content']
+            print(f"General Chat Raw Response Text: {generated_text}")
+            # 返回清理过的文本
+            return generated_text.strip()
+        else:
+            # 处理 API 错误
+            print(f"Error General Chat: DashScope API call failed.")
+            print(f"Status Code: {response.status_code}")
+            error_code = getattr(response, 'code', 'N/A')
+            error_message = getattr(response, 'message', 'Unknown error')
+            print(f"Error Code: {error_code}, Message: {error_message}")
+            # 返回用户友好的错误
+            return f"抱歉，思考时遇到了一点小问题 ({error_code})。"
+
+    except Exception as e:
+        print(f"An unexpected error occurred in get_general_response: {e}")
+        # 返回用户友好的错误
+        return "抱歉，我现在好像有点累，稍后再试吧。"        
