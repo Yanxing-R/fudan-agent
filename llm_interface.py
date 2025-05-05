@@ -4,7 +4,7 @@ import os
 import json
 import dashscope # 确认导入了正确的库
 from dashscope.api_entities.dashscope_response import GenerationResponse # 导入可能的响应类型，具体看文档
-from prompts import NLU_PROMPT_TEMPLATE, GENERAL_CHAT_PROMPT_TEMPLATE # 你的 Prompt 模板保持不变
+from prompts import NLU_PROMPT_TEMPLATE, GENERAL_CHAT_PROMPT_TEMPLATE, PERSONA_RESPONSE_TEMPLATE, PERSONA_NOT_FOUND_TEMPLATE # 你的 Prompt 模板保持不变
 
 # --- 配置 API Key ---
 # 从环境变量读取 API Key
@@ -98,56 +98,112 @@ def get_llm_nlu(user_input):
         print(f"An unexpected error occurred calling DashScope API: {e}")
         return {"intent": "error", "entities": {"message": "Failed to call LLM API"}}
 
-# --- 新增: 通用对话回复函数 ---
+# --- 通用对话回复函数 (更新 Prompt) ---
 def get_general_response(user_input):
-    """
-    调用 LLM 进行通用的对话式回复。
-
-    Args:
-        user_input (str): 用户的原始输入文本。
-
-    Returns:
-        str: LLM 生成的回复文本，如果出错则返回 None 或错误提示。
-    """
+    """调用 LLM 进行通用的、带学姐人设的对话式回复。"""
     if not dashscope.api_key:
         print("错误：General Chat - API Key 未配置。")
-        return "抱歉，我的配置好像有点问题，暂时无法回复。" # 返回用户友好的错误
+        return "唔…学姐我的网络好像有点小问题，稍等一下下哦~" # 用人设语气回复错误
 
-    # 使用新的通用对话 Prompt
+    # 使用更新后的通用对话 Prompt
     prompt = GENERAL_CHAT_PROMPT_TEMPLATE.format(user_input=user_input)
 
     try:
         print(f"--- Debug General Chat: Sending request ---")
-        # print(f"Model: {ALI_MODEL_NAME}") # Debug 时可以取消注释
-        # print(f"Prompt:\n{prompt}") # Debug 时可以取消注释
-
-        # 调用 DashScope API (类似 NLU，但使用不同 Prompt)
         response = dashscope.Generation.call(
             model=ALI_MODEL_NAME,
             prompt=prompt,
-            result_format='message' # 期望返回 message 结构
-            # 可以考虑设置 temperature 等参数让回复更多样性，例如: temperature=0.7
+            result_format='message'
         )
-
         print(f"--- Debug General Chat: Received response ---")
 
         if response.status_code == 200:
-            # 直接获取 LLM 生成的文本内容
             generated_text = response.output.choices[0]['message']['content']
             print(f"General Chat Raw Response Text: {generated_text}")
-            # 返回清理过的文本
             return generated_text.strip()
         else:
             # 处理 API 错误
             print(f"Error General Chat: DashScope API call failed.")
-            print(f"Status Code: {response.status_code}")
+            # ... (错误处理代码同前) ...
             error_code = getattr(response, 'code', 'N/A')
-            error_message = getattr(response, 'message', 'Unknown error')
-            print(f"Error Code: {error_code}, Message: {error_message}")
-            # 返回用户友好的错误
-            return f"抱歉，思考时遇到了一点小问题 ({error_code})。"
+            return f"哎呀，和服务器通讯的时候好像卡了一下 ({error_code})，学弟/学妹你再试一次？"
 
     except Exception as e:
         print(f"An unexpected error occurred in get_general_response: {e}")
-        # 返回用户友好的错误
-        return "抱歉，我现在好像有点累，稍后再试吧。"        
+        return "呜，学姐我好像有点累了，脑子转不动了，稍后再来找我玩吧~"
+
+
+# --- 新增: 结合知识生成回复的函数 ---
+def generate_persona_response(user_input, context_info):
+    """根据背景知识，用学姐人设生成回复。"""
+    if not dashscope.api_key:
+        print("错误：Persona Response - API Key 未配置。")
+        return "唔…学姐我的网络好像有点小问题，稍等一下下哦~"
+
+    # 格式化 context_info，如果是字典或列表，转成易读的字符串
+    if isinstance(context_info, (dict, list)):
+        context_str = json.dumps(context_info, ensure_ascii=False, indent=2)
+        # 可以考虑进一步优化，比如只提取关键字段转成自然语言描述
+        # 例如，对于美食，可以写成 "店名: XX, 简介: YY"
+    else:
+        context_str = str(context_info)
+
+    # 使用结合知识的 Prompt
+    prompt = PERSONA_RESPONSE_TEMPLATE.format(user_input=user_input, context_info=context_str)
+
+    try:
+        print(f"--- Debug Persona Response: Sending request ---")
+        response = dashscope.Generation.call(
+            model=ALI_MODEL_NAME,
+            prompt=prompt,
+            result_format='message'
+        )
+        print(f"--- Debug Persona Response: Received response ---")
+
+        if response.status_code == 200:
+            generated_text = response.output.choices[0]['message']['content']
+            print(f"Persona Response Raw Text: {generated_text}")
+            return generated_text.strip()
+        else:
+            print(f"Error Persona Response: DashScope API call failed.")
+            # ... (错误处理代码同前) ...
+            error_code = getattr(response, 'code', 'N/A')
+            return f"哎呀，和服务器通讯的时候好像卡了一下 ({error_code})，学弟/学妹你再试一次？"
+
+    except Exception as e:
+        print(f"An unexpected error occurred in generate_persona_response: {e}")
+        return "呜，学姐我好像有点累了，脑子转不动了，稍后再来找我玩吧~"
+
+
+# --- 新增: 知识库未找到信息时的回复函数 ---
+def generate_not_found_response(user_input):
+    """当知识库未找到信息时，用学姐人设生成回复。"""
+    if not dashscope.api_key:
+        print("错误：Not Found Response - API Key 未配置。")
+        return "唔…学姐我的网络好像有点小问题，稍等一下下哦~"
+
+    # 使用知识库未找到的 Prompt
+    prompt = PERSONA_NOT_FOUND_TEMPLATE.format(user_input=user_input)
+
+    try:
+        print(f"--- Debug Not Found Response: Sending request ---")
+        response = dashscope.Generation.call(
+            model=ALI_MODEL_NAME,
+            prompt=prompt,
+            result_format='message'
+        )
+        print(f"--- Debug Not Found Response: Received response ---")
+
+        if response.status_code == 200:
+            generated_text = response.output.choices[0]['message']['content']
+            print(f"Not Found Response Raw Text: {generated_text}")
+            return generated_text.strip()
+        else:
+            print(f"Error Not Found Response: DashScope API call failed.")
+            # ... (错误处理代码同前) ...
+            error_code = getattr(response, 'code', 'N/A')
+            return f"哎呀，和服务器通讯的时候好像卡了一下 ({error_code})，学弟/学妹你再试一次？"
+
+    except Exception as e:
+        print(f"An unexpected error occurred in generate_not_found_response: {e}")
+        return "呜，学姐我好像有点累了，脑子转不动了，稍后再来找我玩吧~"    
