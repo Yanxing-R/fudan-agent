@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda environment files (less common inside project, but good practice)
+conda-meta/
+env/
+conda-bld/
+
+# Log files
+*.log
+flask_app.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor specific files (examples, add yours if needed)
+.idea/
+.vscode/
+*.swp
+
+# Sensitive files (should use env vars, but as safety net)
+# .env
+# secrets.yaml
