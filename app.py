@@ -1,209 +1,183 @@
-from flask import Flask, request, abort, jsonify # 确保导入 abort
-# 从 wechatpy 导入所需模块
+# app.py
+from flask import Flask, request, abort, jsonify
 from wechatpy import parse_message, create_reply
 from wechatpy.utils import check_signature
-from wechatpy.exceptions import InvalidSignatureException, InvalidAppIdException
+from wechatpy.exceptions import InvalidSignatureException
 
-# 导入你现有的模块
-import llm_interface
-import knowledge_base
-import json # 可能需要导入 json
+import llm_interface    # LLM 调用 (被 Agents 使用)
+import knowledge_base   # 知识库 (被 Agents 使用)
+# import tools          # 工具定义现在更像是 Specialist Agent 的内部实现
+import multi_agent_system # 导入新的多Agent系统模块
+import json
 import traceback
+import os
 
 app = Flask(__name__)
+app_instance = app # 用于 multi_agent_system 中获取对话历史
 
-# --- 添加微信配置 ---
-WECHAT_TOKEN = "fudanAssistantToken2025" # !! 非常重要：与微信后台填写的 Token 保持一致 !!
-WECHAT_APPID = "你的公众号AppID" # 可选，主要用于更高级的 API 调用
-WECHAT_APPSECRET = "你的公众号AppSecret" # 可选，同上，注意保密
+# --- 微信配置 ---
+WECHAT_TOKEN = os.getenv("WECHAT_TOKEN", "YourDefaultWechatTokenIfNotSetInApp")
+if WECHAT_TOKEN == "YourDefaultWechatTokenIfNotSetInApp":
+    print("警告：微信 Token 使用了 app.py 中的默认值，请检查环境变量。")
 
-# --- 你现有的 / 和 /chat_text 路由可以保留用于其他测试 ---
-@app.route('/')
-def home():
-    return "Fudan Agent is running!"
+# --- 对话历史 (保持简单内存实现，供 Orchestrator 通过 app_instance 回调获取) ---
+conversation_history = {} 
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", 3))
 
-# --- /chat_text 路由 (应用相同的逻辑修改) ---
+def get_user_chat_history_for_agent(user_id: str) -> str:
+    """供 Orchestrator 调用的函数，获取格式化的用户对话历史字符串"""
+    history = conversation_history.get(user_id, [])
+    if not history:
+        return "无之前的对话内容。"
+    formatted_parts = []
+    for turn in history[-MAX_HISTORY_TURNS:]:
+        formatted_parts.append(f"用户: {turn['user']}")
+        formatted_parts.append(f"学姐: {turn['assistant']}")
+    return "\n".join(formatted_parts)
+app.get_user_chat_history_for_agent = get_user_chat_history_for_agent # 挂载到 app 实例
+
+def add_to_user_history(user_id: str, user_msg: str, assistant_msg: str):
+    """添加一轮对话到历史"""
+    if user_id not in conversation_history:
+        conversation_history[user_id] = []
+    conversation_history[user_id].append({"user": user_msg, "assistant": assistant_msg})
+    if len(conversation_history[user_id]) > MAX_HISTORY_TURNS:
+        conversation_history[user_id].pop(0)
+
+# --- 应用启动时初始化 Orchestrator ---
+# main_orchestrator = multi_agent_system.Orchestrator()
+# user_proxy_agent = main_orchestrator.agents.get("FudanUserProxyAgent")
+main_orchestrator = multi_agent_system.get_orchestrator() # 使用 get_orchestrator 获取单例
+user_proxy_agent = main_orchestrator.agents.get("FudanUserProxyAgent")
+
+if not user_proxy_agent:
+    print("严重错误: FudanUserProxyAgent 未能在 Orchestrator 中初始化!")
+    # 实际应用中可能需要退出或采取其他措施
+
+# --- /chat_text 路由 (用于本地测试) ---
 @app.route('/chat_text', methods=['POST'])
-def chat_text():
-    response_text = ""
+def chat_text_endpoint():
     try:
         user_input_bytes = request.data
         user_input = user_input_bytes.decode('utf-8')
-        print(f"--- Debug App (Text): Decoded input: {user_input!r} ---")
-
         if not user_input:
-            return jsonify({"response": "学弟/学妹你想问点什么呀？"}), 400 # 用人设语气
+            return jsonify({"response": "学弟/学妹你想问点什么呀？🤔"}), 400
 
-        # -------- 核心逻辑修改 --------
-        nlu_result = llm_interface.get_llm_nlu(user_input)
-        intent = nlu_result.get('intent', 'unknown')
-        entities = nlu_result.get('entities', {})
-        print(f"--- Debug App (Text): NLU result: intent='{intent}', entities={entities} ---")
+        user_id = "local_test_user" # 本地测试用固定 user_id
 
-        if intent == 'ask_slang_explanation':
-            term = entities.get('slang_term')
-            if term:
-                definition = knowledge_base.get_slang_definition(term)
-                # 检查是否是 "未找到" 的默认回复
-                if "抱歉，我还不知道" in definition:
-                    print(f"--- Slang '{term}' not found in KB, generating not found response ---")
-                    response_text = llm_interface.generate_not_found_response(user_input)
-                else:
-                    print(f"--- Slang '{term}' found, generating persona response ---")
-                    # 将找到的定义交给 LLM 生成回复
-                    response_text = llm_interface.generate_persona_response(user_input, f"关于“{term}”：{definition}")
-            else:
-                # 如果没提取出实体，让通用对话处理或直接提示
-                response_text = llm_interface.get_general_response("请问你想了解哪个校园黑话呢？")
+        if not user_proxy_agent: # 再次检查
+            return jsonify({"response": "抱歉，Agent系统好像还没准备好..."}), 503
 
-        elif intent == 'ask_food_recommendation':
-            location = entities.get('location')
-            if not location:
-                 # 反问也用通用回复生成，更自然
-                 response_text = llm_interface.get_general_response("你想在哪附近找好吃的呀？比如邯郸校区、江湾或者五角场？")
-            else:
-                 food_info = knowledge_base.find_food(location=location)
-                 if "唉呀，暂时没有找到" in food_info: # 检查是否是未找到的回复
-                     print(f"--- Food near '{location}' not found in KB, generating not found response ---")
-                     response_text = llm_interface.generate_not_found_response(user_input)
-                 else:
-                     print(f"--- Food near '{location}' found, generating persona response ---")
-                     # 将找到的美食信息交给 LLM 生成回复
-                     # find_food 返回的是字符串，可以直接用
-                     response_text = llm_interface.generate_persona_response(user_input, food_info)
+        # 1. 通过 UserProxyAgent 发起任务
+        session_id = user_proxy_agent.initiate_task(user_id, user_input)
+        
+        # 2. 运行 Orchestrator 的消息循环直到此会话完成 (阻塞等待)
+        final_reply = main_orchestrator.run_session_until_completion(session_id)
 
-        elif intent == 'greet' or intent == 'goodbye':
-             # 问候和告别也交给通用回复，语气更一致
-             print(f"--- Intent '{intent}', generating general chat response ---")
-             response_text = llm_interface.get_general_response(user_input)
-
-        elif intent == 'error':
-            # NLU 出错，使用通用回复告知用户
-            print(f"NLU Error details: {entities.get('message')}")
-            response_text = llm_interface.get_general_response("哎呀，学姐我刚刚好像走神了，没太听清，能再说一遍吗？")
-
-        elif intent == 'unknown':
-             # 未知意图，使用通用回复
-             print(f"--- Intent 'unknown', generating general chat response ---")
-             response_text = llm_interface.get_general_response(user_input)
-
-        else: # 其他未处理意图
-             print(f"--- Unhandled intent '{intent}', generating general chat response ---")
-             response_text = llm_interface.get_general_response(user_input)
-        # -------- 核心逻辑结束 --------
+        # 3. 添加到对话历史 (注意，最终回复可能来自澄清请求)
+        add_to_user_history(user_id, user_input, final_reply)
+        
+        print(f"--- Debug App (Text): Replying to {user_id} with: {final_reply!r} ---")
+        return jsonify({"response": final_reply})
 
     except UnicodeDecodeError as e:
-        # ... (异常处理) ...
-        response_text = "学姐我这边好像有点乱码了，你发的是文字吗？"
-        return jsonify({"response": response_text}), 400
+        print(f"--- Error App (Text): Decode failed: {e} ---")
+        return jsonify({"response": "学姐我这边好像有点乱码了，你发的是文字吗？😵"}), 400
     except Exception as e:
-        # ... (异常处理) ...
+        print(f"--- Error App (Text): Top level processing failed: {e} ---")
         traceback.print_exc()
-        response_text = "呜呜，系统好像出了点小故障，学姐我先去看看，你稍等一下下哈~"
-        return jsonify({"response": response_text}), 500
-
-    # 返回 JSON 响应
-    print(f"--- Debug App (Text): Replying with: {response_text!r} ---")
-    return jsonify({"response": response_text})
+        return jsonify({"response": "呜呜，系统好像出了点大问题，学姐我先去看看，你稍等一下下哈~ 🛠️"}), 500
 
 
-# --- 新增处理微信请求的路由 ---
+# --- /wechat 路由 (微信公众号回调) ---
 @app.route('/wechat', methods=['GET', 'POST'])
 def wechat_webhook():
-    # 从请求参数中获取微信加密签名相关信息
     signature = request.args.get('signature', '')
     timestamp = request.args.get('timestamp', '')
     nonce = request.args.get('nonce', '')
-
     try:
-        # 1. 校验签名
         check_signature(WECHAT_TOKEN, signature, timestamp, nonce)
     except InvalidSignatureException:
-        # 签名校验失败，拒绝请求
-        print("--- WeChat Error: Invalid signature ---")
-        abort(403) # HTTP 403 Forbidden
+        print("微信签名校验失败！")
+        abort(403)
 
-    # ------------------ 处理 GET 请求 (用于微信服务器验证) ------------------
     if request.method == 'GET':
-        # 微信服务器会发送 GET 请求来验证你的服务器URL是否有效
-        echostr = request.args.get('echostr', '')
-        print(f"--- WeChat Verification OK, returning echostr ---")
-        return echostr # 校验成功，原样返回 echostr
+        print("微信服务器验证成功。")
+        return request.args.get('echostr', '')
 
-    # ------------------ 处理 POST 请求 (用户发送的消息) ------------------
     elif request.method == 'POST':
-        response_text = ""
+        msg = None
+        user_id = "unknown_wechat_user"
         try:
             msg = parse_message(request.data)
-            print(f"--- WeChat Message Received --- Type: {msg.type}, From: {msg.source}")
+            user_id = msg.source 
+            print(f"--- 微信消息收到 --- 类型: {msg.type}, 来自: {user_id}")
+
+            final_reply_text = "学姐暂时无法处理你的请求哦，请稍后再试~ 😥" 
 
             if msg.type == 'text':
                 user_input = msg.content
-                print(f"--- WeChat User Input: {user_input!r} ---")
-
-                # -------- 核心逻辑修改 (与 chat_text 完全一致) --------
-                nlu_result = llm_interface.get_llm_nlu(user_input)
-                intent = nlu_result.get('intent', 'unknown')
-                entities = nlu_result.get('entities', {})
-                print(f"--- WeChat NLU result: intent='{intent}', entities={entities} ---")
-
-                if intent == 'ask_slang_explanation':
-                    term = entities.get('slang_term')
-                    if term:
-                        definition = knowledge_base.get_slang_definition(term)
-                        if "抱歉，我还不知道" in definition:
-                            response_text = llm_interface.generate_not_found_response(user_input)
-                        else:
-                            response_text = llm_interface.generate_persona_response(user_input, f"关于“{term}”：{definition}")
-                    else:
-                        response_text = llm_interface.get_general_response("请问你想了解哪个校园黑话呢？")
-                elif intent == 'ask_food_recommendation':
-                    location = entities.get('location')
-                    if not location:
-                         response_text = llm_interface.get_general_response("你想在哪附近找好吃的呀？比如邯郸校区、江湾或者五角场？")
-                    else:
-                         food_info = knowledge_base.find_food(location=location)
-                         if "唉呀，暂时没有找到" in food_info:
-                             response_text = llm_interface.generate_not_found_response(user_input)
-                         else:
-                             response_text = llm_interface.generate_persona_response(user_input, food_info)
-                elif intent == 'greet' or intent == 'goodbye':
-                     response_text = llm_interface.get_general_response(user_input)
-                elif intent == 'error':
-                    print(f"NLU Error details: {entities.get('message')}")
-                    response_text = llm_interface.get_general_response("哎呀，学姐我刚刚好像走神了，没太听清，能再说一遍吗？")
-                elif intent == 'unknown':
-                     response_text = llm_interface.get_general_response(user_input)
-                else: # 其他未处理意图
-                     response_text = llm_interface.get_general_response(user_input)
-                # -------- 核心逻辑结束 --------
+                if not user_proxy_agent:
+                     final_reply_text = "抱歉，Agent系统好像还没准备好..."
+                else:
+                    session_id = user_proxy_agent.initiate_task(user_id, user_input)
+                    final_reply_text = main_orchestrator.run_session_until_completion(session_id)
+                add_to_user_history(user_id, user_input, final_reply_text)
 
             elif msg.type == 'event' and msg.event == 'subscribe':
-                # 关注欢迎语也可以用 LLM 生成，更个性化
-                response_text = llm_interface.get_general_response("一个新朋友关注了我！") # 让 LLM 基于这个输入生成欢迎语
-                # 或者保留固定欢迎语：
-                # response_text = "欢迎关注复旦校园助手！发送你想了解的复旦“黑话”或者问我附近的美食吧~"
-            else:
-                response_text = llm_interface.get_general_response("嗯？你发的好像不是文字消息哦~学姐我暂时还看不懂图片和表情呢。") # 用人设回复
+                # 关注事件，可以直接由 UserProxyAgent 生成或通过 LLM 生成问候
+                # 为了简化，这里我们用一个固定的或通过 LLM 生成的简单回复
+                # 注意：这里的 user_input 是我们构造的，不直接来自用户
+                constructed_user_input_for_welcome = "一个新朋友刚刚关注了我，请热情地欢迎TA！"
+                session_id = user_proxy_agent.initiate_task(user_id, constructed_user_input_for_welcome)
+                final_reply_text = main_orchestrator.run_session_until_completion(session_id)
+                # 欢迎语通常不记录为 user_input，但可以记录 assistant_reply
+                add_to_user_history(user_id, "(新用户关注)", final_reply_text)
 
-            # 创建并渲染回复
-            if response_text:
-                print(f"--- WeChat Replying With: {response_text!r} ---")
-                reply = create_reply(response_text, message=msg)
+
+            else: # 其他非文本消息
+                constructed_input_for_other_types = f"我收到了一个类型为 {msg.type} 的消息（不是文字），我应该怎么礼貌地告诉用户我主要处理文字呢？"
+                session_id = user_proxy_agent.initiate_task(user_id, constructed_input_for_other_types)
+                final_reply_text = main_orchestrator.run_session_until_completion(session_id)
+                add_to_user_history(user_id, f"(收到 {msg.type} 消息)", final_reply_text)
+            
+            if final_reply_text:
+                print(f"--- 微信回复给 {user_id} 内容: {final_reply_text!r} ---")
+                reply = create_reply(final_reply_text, message=msg)
                 return reply.render()
-            else:
-                print("--- Warning: No response text generated for the WeChat message ---")
-                return "success"
+            return "success"
 
         except Exception as e:
-            # 全局异常处理
-            print(f"--- WeChat Error processing POST request: {e} ---")
+            print(f"--- 微信 POST 请求处理错误 for {user_id}: {e} ---")
             traceback.print_exc()
-            return "success" # 仍然返回 success 避免微信重试
+            try:
+                if msg:
+                    error_reply = create_reply("呜呜，系统好像出了点小故障，学姐我先去看看，你稍等一下下哈~ 🛠️", message=msg)
+                    return error_reply.render()
+            except Exception as e_reply:
+                print(f"--- 微信错误回复也失败了: {e_reply} ---")
+            return "success"
 
-# --- 启动代码 (保持不变) ---
+
+# --- 应用启动 ---
 if __name__ == '__main__':
-    knowledge_base.load_data()
-    # 部署时使用 Gunicorn/Waitress
-    # 本地测试时：
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("--- 复旦校园助手 Agent (多Agent版) 启动中 ---")
+    knowledge_base.load_all_data() # 加载所有知识库
+    main_orchestrator = multi_agent_system.get_orchestrator() # 确保 Orchestrator 已初始化
+    user_proxy_agent = main_orchestrator.agents.get("FudanUserProxyAgent") # 获取 UserProxyAgent 实例
+    
+    if not user_proxy_agent: # 增加启动时检查
+        print("严重错误: FudanUserProxyAgent 未能在 Orchestrator 中正确初始化。应用无法启动。")
+        exit(1)
+
+    print(f"微信 Token (可能来自环境变量或默认值): {WECHAT_TOKEN[:5]}...")
+    print(f"对话历史将保留最近 {MAX_HISTORY_TURNS} 轮。")
+    print(f"支持的动态知识类别: {knowledge_base.SUPPORTED_DYNAMIC_CATEGORIES}")
+    
+    # 打印 Orchestrator 中注册的 Agent
+    if main_orchestrator and hasattr(main_orchestrator, 'agents'):
+        print(f"Orchestrator 中已注册的 Agent ({len(main_orchestrator.agents)} 个): {list(main_orchestrator.agents.keys())}")
+    
+    app.run(host='0.0.0.0', port=5000, debug=True) # debug=True 仅用于开发
+
+
