@@ -73,6 +73,8 @@ Agent 采用多 Agent 协作架构，定义在 `multi_agent_system.py` 中。系
 * **版本控制**: Git, GitHub
 
 ## 项目结构
+
+```text
 fudan_agent/
 ├── app.py                     # Flask 主应用，微信回调，HTTP接口，应用初始化
 ├── multi_agent_system.py      # 定义 Agent 基类、所有具体 Agent 和 Orchestrator (权威来源)
@@ -90,6 +92,7 @@ fudan_agent/
 │       └── {user_id}/         # 每个用户的个人知识库
 │           └── my_notes.json  # 示例：某用户的个人笔记
 └── logs/                      # (可选) 存放应用日志的目录 (例如 gunicorn_error.log)
+
 ## 安装与设置
 
 1.  **环境准备** (以已安装 Conda 的 Linux 服务器为例)
