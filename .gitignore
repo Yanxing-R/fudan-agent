@@ -13,6 +13,9 @@ conda-bld/
 *.log
 flask_app.log
 
+# JSON files
+*.json
+
 # OS generated files
 .DS_Store
 Thumbs.db
@@ -23,5 +26,5 @@ Thumbs.db
 *.swp
 
 # Sensitive files (should use env vars, but as safety net)
-# .env
+.env
 # secrets.yaml
