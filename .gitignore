@@ -28,3 +28,6 @@ Thumbs.db
 # Sensitive files (should use env vars, but as safety net)
 .env
 # secrets.yaml
+# Ignore JSON files except those in data directory
+*.json
+!data/**/*.json
