@@ -12,6 +12,8 @@ conda-bld/
 # Log files
 *.log
 flask_app.log
+access.log
+error.log
 
 # JSON files
 *.json
@@ -31,3 +33,10 @@ Thumbs.db
 # Ignore JSON files except those in data directory
 *.json
 !data/**/*.json
+
+# Production runtime files
+gunicorn.pid
+venv/
+
+# Conda environment (local)
+miniconda3/

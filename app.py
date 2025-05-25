@@ -129,6 +129,15 @@ def ensure_initialized():
         # 可以考虑抛出异常或返回一个标准的服务器错误
         abort(503, description="Agent 系统正在初始化，请稍后重试。")
 
+@app.route('/', methods=['GET'])
+def index():
+    """根路由，返回简单的状态信息和时间"""
+    return jsonify({
+        "status": "success",
+        "message": "复旦智能体服务正在运行",
+    })
+
+
 
 # --- /chat_text 路由 (用于本地测试) ---
 @app.route('/chat_text', methods=['POST'])
