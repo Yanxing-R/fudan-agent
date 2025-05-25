@@ -82,7 +82,8 @@ fudan_agent/
 ├── knowledge_base.py          # 加载和管理静态、共享动态、个人动态知识库的函数
 ├── llm_interface.py           # 封装与 LLM API 的交互，支持多LLM模型配置
 ├── prompts.py                 # 存放指导 LLM 进行规划、回复生成、审核等的 Prompt 模板
-├── requirements.txt           # Python 依赖库列表
+├── database_syncer.py         # MongoDB 数据库双向同步功能模块 (可选)
+├── requirements.txt           # Python 依赖库列表 (包含 pymongo)
 ├── data/                      # 存放知识库文件
 │   ├── static_slang.json      # 示例：黑话词条 (静态)
 │   ├── static_food.json       # 示例：美食信息 (静态)
@@ -122,7 +123,29 @@ fudan_agent/
         * `RESPONSE_LLM_MODEL`
         * `MODERATOR_LLM_MODEL`
 
-3.  **初始化知识库目录和文件**
+3.  **MongoDB 数据库同步配置 (可选)**
+    
+    项目现在支持与 MongoDB 远程数据库的双向同步功能，可以在多个环境或实例之间共享知识库数据。
+    
+    * `MONGODB_CONNECTION_STRING`: (可选) MongoDB 连接字符串。如果未设置，系统将只使用本地文件存储。
+        ```bash
+        export MONGODB_URI="mongodb+srv://username:password@cluster.mongodb.net/fudan_agent?tls=true&authSource=admin"
+        ```
+    
+    **MongoDB 同步功能说明**:
+    * **启动时自动同步**: 系统启动时会自动比较本地文件和远程数据库，进行双向同步
+        * 如果本地有文件但远程没有，会上传到 MongoDB
+        * 如果远程有文件但本地没有，会下载到本地
+        * 如果两边都有但内容不同，会保留最新修改的版本
+    * **实时同步**: 当本地文件被修改时，会自动异步上传到 MongoDB
+    * **优雅降级**: 如果 MongoDB 连接失败，系统会自动回退到纯本地文件模式，不影响正常功能
+    
+    **数据库结构**:
+    * 数据库名: `fudan_agent`
+    * 集合名: `files`
+    * 文档结构: `{"file_path": "data/xxx.json", "content": {...}, "last_modified": datetime, "checksum": "...", "upload_timestamp": datetime}`
+
+4.  **初始化知识库目录和文件**
     * 确保 `data/` 目录存在。
     * 如果需要，可以预先创建 `data/personal_kbs/` 目录。
     * 根据 `knowledge_base.py` 中 `STATIC_KB_CONFIG` 的定义，在 `data/` 目录下放置初始的静态知识库 JSON 文件 (如 `static_slang.json`, `static_food.json`, `static_campus_info.json`)。如果文件不存在，系统会尝试使用默认空数据加载。

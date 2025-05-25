@@ -5,6 +5,15 @@ import random
 import glob
 from collections import Counter # For review agent logic
 
+# Import database syncer for MongoDB integration (optional - graceful fallback if not available)
+try:
+    import database_syncer
+    _DB_SYNC_ENABLED = True
+except ImportError:
+    print("警告: database_syncer 模块未找到，MongoDB同步功能将被禁用。")
+    database_syncer = None
+    _DB_SYNC_ENABLED = False
+
 # --- Configuration: File Paths and Categories ---
 DATA_DIR = "data"
 PERSONAL_KBS_DIR = os.path.join(DATA_DIR, "personal_kbs") # Base dir for all personal KBs
@@ -74,11 +83,16 @@ def _load_json_file(file_path: str, default_data_structure_generator=None):
 
 def _save_json_file(file_path: str, data) -> bool:
     try:
-        parent_dir = os.path.dirname(file_path)
-        if not _ensure_dir_exists(parent_dir): return False
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        return True
+        # Use enhanced save function if database syncer is available
+        if _DB_SYNC_ENABLED and database_syncer:
+            return database_syncer.enhanced_save_json_file(file_path, data, sync_to_db=True)
+        else:
+            # Fallback to original implementation
+            parent_dir = os.path.dirname(file_path)
+            if not _ensure_dir_exists(parent_dir): return False
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            return True
     except Exception as e: print(f"错误: 保存数据到 '{file_path}' 失败: {e}"); return False
 
 # --- Initialization ---

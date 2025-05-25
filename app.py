@@ -13,7 +13,29 @@ import json
 import traceback
 import os
 
+# Import database syncer for MongoDB integration (optional - graceful fallback)
+try:
+    import database_syncer
+    _DB_SYNC_AVAILABLE = True
+    print("✅ database_syncer 模块已导入，MongoDB同步功能可用。")
+except ImportError:
+    print("⚠️ database_syncer 模块未找到，MongoDB同步功能将被禁用。")
+    database_syncer = None
+    _DB_SYNC_AVAILABLE = False
+
+
+
+# Initialize database sync first (if available)
+if _DB_SYNC_AVAILABLE and database_syncer:
+    try:
+        database_syncer.initialize_database_sync()
+        print
+    except Exception as e:
+        print(f"⚠️ 数据库同步初始化失败，将继续使用本地文件: {e}")
+
 app = Flask(__name__)
+
+
 # 将 app 实例传递给 multi_agent_system 模块，以便 Orchestrator 可以回调
 # 这需要在 multi_agent_system.py 中有一个全局变量 app_instance = None
 # 并在 Orchestrator 初始化或 set_app_context 时使用它
@@ -67,6 +89,7 @@ def initialize_app_components():
     if _app_components_initialized: return
 
     print("--- 应用组件初始化开始 ---")
+    
     knowledge_base.load_all_data()
     main_orchestrator = multi_agent_system.get_orchestrator() # 这会创建 Orchestrator 和所有内部 Agent
     
@@ -164,18 +187,49 @@ def wechat_webhook():
             except Exception as e_reply: print(f"--- 微信错误回复也失败了: {e_reply} ---")
             return "success"
 
+# --- 应用清理函数 ---
+def cleanup_app_resources():
+    """清理应用资源，包括数据库连接等"""
+    if _DB_SYNC_AVAILABLE and database_syncer:
+        try:
+            database_syncer.cleanup_database_sync()
+        except Exception as e:
+            print(f"数据库同步清理时出错: {e}")
+
+# Register cleanup function to be called on app shutdown
+import atexit
+atexit.register(cleanup_app_resources)
+
 # --- 应用启动 ---
 if __name__ == '__main__':
     print("--- 复旦校园助手 Agent (MAS - 分离 Specialist Agents) 启动中 ---")
-    initialize_app_components() # 在主程序块中调用初始化
-    if not main_orchestrator or not user_proxy_agent: print("严重错误: 应用组件未能成功初始化。程序退出。"); exit(1)
-    print(f"微信 Token (可能来自环境变量或默认值): {WECHAT_TOKEN[:5]}...")
-    print(f"对话历史将保留最近 {MAX_HISTORY_TURNS} 轮。")
-    if main_orchestrator and hasattr(main_orchestrator, 'agents'):
-        if "KnowledgeAgent" in main_orchestrator.agents:
-            ksa = main_orchestrator.agents["KnowledgeAgent"]
-            if hasattr(ksa, 'knowledge_tools_map'): print(f"KnowledgeAgent 已加载知识工具: {list(ksa.knowledge_tools_map.keys())}")
-        if "UtilityAgent" in main_orchestrator.agents:
-            usa = main_orchestrator.agents["UtilityAgent"]
-            if hasattr(usa, 'utility_tools_map'): print(f"UtilityAgent 已加载通用工具: {list(usa.utility_tools_map.keys())}")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    
+    try:
+        initialize_app_components() # 在主程序块中调用初始化
+        if not main_orchestrator or not user_proxy_agent: 
+            print("严重错误: 应用组件未能成功初始化。程序退出。")
+            exit(1)
+        
+        print(f"微信 Token (可能来自环境变量或默认值): {WECHAT_TOKEN[:5]}...")
+        print(f"对话历史将保留最近 {MAX_HISTORY_TURNS} 轮。")
+        
+        if main_orchestrator and hasattr(main_orchestrator, 'agents'):
+            if "KnowledgeAgent" in main_orchestrator.agents:
+                ksa = main_orchestrator.agents["KnowledgeAgent"]
+                if hasattr(ksa, 'knowledge_tools_map'): 
+                    print(f"KnowledgeAgent 已加载知识工具: {list(ksa.knowledge_tools_map.keys())}")
+            if "UtilityAgent" in main_orchestrator.agents:
+                usa = main_orchestrator.agents["UtilityAgent"]
+                if hasattr(usa, 'utility_tools_map'): 
+                    print(f"UtilityAgent 已加载通用工具: {list(usa.utility_tools_map.keys())}")
+        
+        print("🚀 系统启动完成，开始监听请求...")
+        app.run(host='0.0.0.0', port=5000, debug=True)
+        
+    except KeyboardInterrupt:
+        print("\n👋 收到中断信号，正在优雅关闭...")
+        cleanup_app_resources()
+    except Exception as e:
+        print(f"❌ 应用启动失败: {e}")
+        cleanup_app_resources()
+        exit(1)
