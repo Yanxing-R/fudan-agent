@@ -192,6 +192,8 @@ fudan_agent/
         ```bash
         curl -X POST -H "Content-Type: text/plain; charset=utf-8" --data "你好呀，旦旦学姐！" http://localhost:5000/chat_text
         curl -X POST -H "Content-Type: text/plain; charset=utf-8" --data "江湾校区有什么好吃的？" http://localhost:5000/chat_text
+        # Windows PowerShell 版本:
+        Invoke-RestMethod -Uri "http://localhost:5000/chat_text" -Method POST -Headers @{"Content-Type"="text/plain; charset=utf-8"} -Body "我教你，小食堂指的是职工食堂？" -ContentType "text/plain; charset=utf-8"
         ```
 
 2.  **微信公众号交互**:

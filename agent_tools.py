@@ -189,8 +189,12 @@ class LearnNewInfoTool(Tool):
 
         result_dict = {"status": "failure", "data": "你想教给学姐什么新知识呢？需要告诉我知识的类别、主题/信息，或者具体的问题和答案哦。😊"}
         if question_taught and answer_taught:
-            result_dict = knowledge_base.add_learned_qa_pair_to_personal_kb(user_id, knowledge_category, question_taught, answer_taught)
-        elif topic and information:
+            try:
+                result_dict = knowledge_base.add_learned_qa_pair_to_personal_kb(user_id, knowledge_category, question_taught, answer_taught)
+            except Exception as e:
+                print(f"Error adding QA pair to personal KB: {e}")
+                result_dict = {"status": "error", "data": f"添加问答对时发生错误: {str(e)}"}
+        elif information:
             result_dict = knowledge_base.add_learned_info_to_personal_kb(user_id, knowledge_category, topic, information)
         
         return result_dict # Returns dict from knowledge_base

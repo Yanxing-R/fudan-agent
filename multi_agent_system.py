@@ -376,7 +376,7 @@ class Orchestrator:
                 original_query = self.sessions[session_id].get("user_query", "N/A")
                 print(f"🚫 Moderation failed for query: '{original_query}'")
             else:
-                user_friendly_error = f"哎呀，学姐在处理你的请求时好像遇到了一点小麻烦 ({str(error_reason)[:50]}...)，要不我们换个话题或者稍后再试？😥"
+                user_friendly_error = f"哎呀，学姐在处理你的请求时好像遇到了一点小麻烦 ({str(error_reason)}...)，要不我们换个话题或者稍后再试？😥"
             self.sessions[session_id]["final_answer"] = user_friendly_error
             if session_id in self.session_completion_events: self.session_completion_events[session_id].set()
         else: print(f"⚠️ [会话管理] 尝试处理不存在的会话 '{session_id}' 的失败。")
@@ -386,75 +386,77 @@ class Orchestrator:
         if not session_data: print(f"⚠️ [编排器] 收到未知会话 '{session_id}' 的消息。忽略。"); return
         message_type = message["message_type"];
         print(f"⚙️ [编排器] 处理会话 '{session_id}' 的消息，类型: '{message_type}' (来自: '{message['sender_id']}')")
+        try:
+            if message_type == "new_user_query_received": 
+                payload_for_review = message["payload"] # Contains 'user_query' and 'user_id'
+                session_data["status"] = "pending_review"
+                # Message type for ReviewAgent should be specific if it expects one, or generic.
+                # Assuming ReviewAgent's process_message handles the payload directly.
+                self.add_message_to_queue(self.agents["ReviewAgent"]._create_message(
+                    recipient_id="ReviewAgent",
+                    message_type="request_input_review", # This type is descriptive
+                    payload=payload_for_review, # Forward the payload containing user_query
+                    session_id=session_id
+                ))
+            elif message_type == "moderation_failed_with_warning": 
+                self._handle_session_failure(session_id, message["payload"].get("warning_message", "您的输入可能不当"), is_moderation_failure=True)
+            elif message_type == "moderation_passed_for_planning": 
+                # Payload from ReviewAgent now contains 'user_input' (which is the original 'user_query')
+                original_user_input_from_review = message["payload"].get("user_input")
+                user_id = message["payload"].get("user_id");
+                print(f"👍 [编排器] 会话 '{session_id}' (用户: {user_id}, 查询: '{original_user_input_from_review}') 内容审核通过。转发给规划器。");
+                session_data["status"] = "pending_plan"
+                self.add_message_to_queue(self.agents["FudanPlannerAgent"]._create_message(
+                    recipient_id="FudanPlannerAgent",
+                    message_type="user_query_for_planning",
+                    payload={"user_query": original_user_input_from_review, "user_id": user_id}, # Planner expects 'user_query'
+                    session_id=session_id
+                ))
+            elif message_type == "plan_submission": 
+                plan = message["payload"].get("plan")
+                if not isinstance(plan, list) or not all(isinstance(step, dict) and "agent_id" in step and "task_payload" in step for step in plan):
+                    self._handle_session_failure(session_id, "Planner提交的计划格式无效。"); return
+                if not plan: print(f"ℹ️ [编排器] 会话 '{session_id}' 收到空计划。"); return
+                session_data["plan"] = plan;
+                # Ensure original_query and user_id are stored if not already (e.g., if plan comes very early)
+                if "original_query" not in session_data or not session_data["original_query"]:
+                    session_data["original_query"] = message["payload"].get("original_query", session_data.get("user_query")) # Fallback to initial query
+                if "user_id" not in session_data or not session_data["user_id"]:
+                    session_data["user_id"] = message["payload"].get("user_id", self.get_session_user_id(session_id))
 
-        if message_type == "new_user_query_received": 
-            payload_for_review = message["payload"] # Contains 'user_query' and 'user_id'
-            session_data["status"] = "pending_review"
-            # Message type for ReviewAgent should be specific if it expects one, or generic.
-            # Assuming ReviewAgent's process_message handles the payload directly.
-            self.add_message_to_queue(self.agents["ReviewAgent"]._create_message(
-                recipient_id="ReviewAgent",
-                message_type="request_input_review", # This type is descriptive
-                payload=payload_for_review, # Forward the payload containing user_query
-                session_id=session_id
-            ))
-        elif message_type == "moderation_failed_with_warning": 
-            self._handle_session_failure(session_id, message["payload"].get("warning_message", "您的输入可能不当"), is_moderation_failure=True)
-        elif message_type == "moderation_passed_for_planning": 
-            # Payload from ReviewAgent now contains 'user_input' (which is the original 'user_query')
-            original_user_input_from_review = message["payload"].get("user_input")
-            user_id = message["payload"].get("user_id");
-            print(f"👍 [编排器] 会话 '{session_id}' (用户: {user_id}, 查询: '{original_user_input_from_review}') 内容审核通过。转发给规划器。");
-            session_data["status"] = "pending_plan"
-            self.add_message_to_queue(self.agents["FudanPlannerAgent"]._create_message(
-                recipient_id="FudanPlannerAgent",
-                message_type="user_query_for_planning",
-                payload={"user_query": original_user_input_from_review, "user_id": user_id}, # Planner expects 'user_query'
-                session_id=session_id
-            ))
-        elif message_type == "plan_submission": 
-            plan = message["payload"].get("plan")
-            if not isinstance(plan, list) or not all(isinstance(step, dict) and "agent_id" in step and "task_payload" in step for step in plan):
-                self._handle_session_failure(session_id, "Planner提交的计划格式无效。"); return
-            if not plan: print(f"ℹ️ [编排器] 会话 '{session_id}' 收到空计划。"); return
-            session_data["plan"] = plan;
-            # Ensure original_query and user_id are stored if not already (e.g., if plan comes very early)
-            if "original_query" not in session_data or not session_data["original_query"]:
-                 session_data["original_query"] = message["payload"].get("original_query", session_data.get("user_query")) # Fallback to initial query
-            if "user_id" not in session_data or not session_data["user_id"]:
-                 session_data["user_id"] = message["payload"].get("user_id", self.get_session_user_id(session_id))
-
-            session_data["status"] = "processing_plan";
-            session_data["current_step_index"] = 0;
-            session_data["step_results"] = []
-            self._execute_next_plan_step(session_id)
-        elif message_type == "step_result": 
-            step_payload = message["payload"]
-            executed_tool_result_dict = step_payload.get("executed_tool_result", {"status": "error", "data": "Specialist Agent未提供工具结果字典"})
-            original_task_payload_from_agent = step_payload.get("original_task_payload", {})
-
-            session_data["step_results"].append({
-                "agent_id": message["sender_id"],
-                "executed_tool_result": executed_tool_result_dict, 
-                "original_task_payload": original_task_payload_from_agent
-            })
-            
-            tool_status = executed_tool_result_dict.get("status", "unknown_status")
-            if tool_status in ["failure", "error"]: 
-                failure_data = executed_tool_result_dict.get("data", "未知错误")
-                self._handle_session_failure(session_id, f"步骤执行失败 (Agent: {message['sender_id']}, Status: {tool_status}): {failure_data}"); return
-
-            session_data["current_step_index"] += 1
-            if session_data["current_step_index"] < len(session_data["plan"]):
+                session_data["status"] = "processing_plan";
+                session_data["current_step_index"] = 0;
+                session_data["step_results"] = []
                 self._execute_next_plan_step(session_id)
-            else:
-                print(f"✅ [编排器] 会话 '{session_id}' 的所有计划步骤已完成。请求最终答案综合。"); session_data["status"] = "pending_synthesis"
-                synthesis_request_payload = {"original_query": session_data["user_query"], "user_id": session_data["user_id"], "step_results": session_data["step_results"]}
-                self.add_message_to_queue(self.agents["FudanPlannerAgent"]._create_message(recipient_id="FudanPlannerAgent", message_type="request_synthesis", payload=synthesis_request_payload, session_id=session_id))
-        elif message_type == "error_notification": 
-            self._handle_session_failure(session_id, f"Agent '{message['sender_id']}' 报告错误: {message['payload'].get('error', '未知错误')}")
-        else: print(f"⚠️ [编排器] 收到未处理的 Orchestrator 消息类型: '{message_type}'")
+            elif message_type == "step_result": 
+                step_payload = message["payload"]
+                executed_tool_result_dict = step_payload.get("executed_tool_result", {"status": "error", "data": "Specialist Agent未提供工具结果字典"})
+                original_task_payload_from_agent = step_payload.get("original_task_payload", {})
 
+                session_data["step_results"].append({
+                    "agent_id": message["sender_id"],
+                    "executed_tool_result": executed_tool_result_dict, 
+                    "original_task_payload": original_task_payload_from_agent
+                })
+                
+                tool_status = executed_tool_result_dict.get("status", "unknown_status")
+                if tool_status in ["failure", "error"]: 
+                    failure_data = executed_tool_result_dict.get("data", "未知错误")
+                    self._handle_session_failure(session_id, f"步骤执行失败 (Agent: {message['sender_id']}, Status: {tool_status}): {failure_data}"); return
+
+                session_data["current_step_index"] += 1
+                if session_data["current_step_index"] < len(session_data["plan"]):
+                    self._execute_next_plan_step(session_id)
+                else:
+                    print(f"✅ [编排器] 会话 '{session_id}' 的所有计划步骤已完成。请求最终答案综合。"); session_data["status"] = "pending_synthesis"
+                    synthesis_request_payload = {"original_query": session_data["user_query"], "user_id": session_data["user_id"], "step_results": session_data["step_results"]}
+                    self.add_message_to_queue(self.agents["FudanPlannerAgent"]._create_message(recipient_id="FudanPlannerAgent", message_type="request_synthesis", payload=synthesis_request_payload, session_id=session_id))
+            elif message_type == "error_notification": 
+                self._handle_session_failure(session_id, f"Agent '{message['sender_id']}' 报告错误: {message['payload'].get('error', '未知错误')}")
+            else: print(f"⚠️ [编排器] 收到未处理的 Orchestrator 消息类型: '{message_type}'")
+        except Exception as e: 
+            print(f"❌ [编排器] 处理会话 '{session_id}' 的消息时发生错误: {e}")
+            traceback.print_exc()
     def _execute_next_plan_step(self, session_id: str):
         session_data = self.sessions.get(session_id)
         if not (session_data and session_data["status"] == "processing_plan" and session_data.get("plan")):
