@@ -23,5 +23,5 @@ Thumbs.db
 *.swp
 
 # Sensitive files (should use env vars, but as safety net)
-# .env
+.env
 # secrets.yaml

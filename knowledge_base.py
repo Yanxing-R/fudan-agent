@@ -4,6 +4,7 @@ import os
 import random
 import glob
 from collections import Counter # For review agent logic
+from thefuzz import fuzz, process
 
 # Import database syncer for MongoDB integration (optional - graceful fallback if not available)
 try:
@@ -49,15 +50,15 @@ shared_dynamic_kbs_data = {} # For general dynamic knowledge
 
 # --- Constants for "Not Found" / Informative Messages ---
 # 这些常量仍然有用，但函数会返回结构化数据
-NOT_FOUND_STATIC_SLANG_MSG = "抱歉，学姐的权威小本本上还没有关于“{term}”这个黑话的记录呢。🤔"
+NOT_FOUND_STATIC_SLANG_MSG = "抱歉，学姐的权威小本本上还没有关于\"{term}\"这个黑话的记录呢。🤔"
 NOT_FOUND_STATIC_FOOD_MSG = "哎呀，学姐的官方美食指南里暂时没有找到符合你要求的美食推荐哦。🍜"
-NOT_FOUND_STATIC_CAMPUS_INFO_MSG = "关于“{topic}”的官方信息，学姐这里暂时还没有录入哦。"
+NOT_FOUND_STATIC_CAMPUS_INFO_MSG = "关于\"{topic}\"的官方信息，学姐这里暂时还没有录入哦。"
 
-NOT_FOUND_SHARED_DYNAMIC_INFO_MSG = "学姐翻了翻大家的共享笔记，暂时没有找到和你问题“{query}”直接相关的信息呢。也许还没人教过我这个？😅"
-NOT_FOUND_PERSONAL_DYNAMIC_INFO_MSG = "在你的专属小本本里，学姐暂时没有找到关于“{query}”的信息哦。是不是还没教过我呀？✍️"
-NOT_FOUND_ANY_INFO_FOR_QUERY_MSG = "关于“{query}”，学姐的个人笔记、共享笔记和官方资料里都没有找到相关信息呢。" # 更通用的未找到
-NOT_FOUND_CATEGORY_INFO_MSG = "关于“{category}”类别，学姐的知识库还是空的哦。要不你先教我一点？"
-LEARNED_TO_PERSONAL_KB_CONFIRMATION_MSG = "好嘞，学姐已经在你的个人小本本上记下关于“{category}”的这个信息啦！如果很多人都教我类似的内容，我说不定能把它变成通用知识哦。😉"
+NOT_FOUND_SHARED_DYNAMIC_INFO_MSG = "学姐翻了翻大家的共享笔记，暂时没有找到和你问题\"{query}\"直接相关的信息呢。也许还没人教过我这个？😅"
+NOT_FOUND_PERSONAL_DYNAMIC_INFO_MSG = "在你的专属小本本里，学姐暂时没有找到关于\"{query}\"的信息哦。是不是还没教过我呀？✍️"
+NOT_FOUND_ANY_INFO_FOR_QUERY_MSG = "关于\"{query}\"，学姐的个人笔记、共享笔记和官方资料里都没有找到相关信息呢。" # 更通用的未找到
+NOT_FOUND_CATEGORY_INFO_MSG = "关于\"{category}\"类别，学姐的知识库还是空的哦。要不你先教我一点？"
+LEARNED_TO_PERSONAL_KB_CONFIRMATION_MSG = "好嘞，学姐已经在你的个人小本本上记下关于\"{category}\"的这个信息啦！如果很多人都教我类似的内容，我说不定能把它变成通用知识哦。😉"
 
 # --- Utility Functions (largely unchanged) ---
 def _ensure_dir_exists(dir_path: str):
@@ -95,6 +96,202 @@ def _save_json_file(file_path: str, data) -> bool:
             return True
     except Exception as e: print(f"错误: 保存数据到 '{file_path}' 失败: {e}"); return False
 
+# --- Fuzzy Search Utility Functions ---
+def _format_nested_content(data, max_depth=2, current_depth=0):
+    """格式化嵌套内容的显示，避免过深的嵌套"""
+    if current_depth >= max_depth:
+        return "[内容过深，已省略]"
+    
+    if isinstance(data, str):
+        return data
+    elif isinstance(data, dict):
+        content_parts = []
+        for key, value in data.items():
+            if isinstance(value, str):
+                content_parts.append(f"{'  ' * current_depth}- {key}: {value}")
+            elif isinstance(value, dict):
+                content_parts.append(f"{'  ' * current_depth}- {key}:")
+                nested_content = _format_nested_content(value, max_depth, current_depth + 1)
+                content_parts.append(nested_content)
+        return "\n".join(content_parts)
+    else:
+        return str(data)
+
+def _fuzzy_match_slang(term: str, slang_dict: dict, threshold: int = 70) -> list:
+    """使用模糊匹配查找俚语，返回匹配度高于阈值的结果列表"""
+    if not slang_dict:
+        return []
+    
+    # 使用thefuzz进行模糊匹配
+    matches = process.extract(term, slang_dict.keys(), limit=3, scorer=fuzz.ratio)
+    
+    # 过滤低于阈值的匹配
+    good_matches = [(key, score) for key, score in matches if score >= threshold]
+    
+    # 返回匹配的结果
+    results = []
+    for key, score in good_matches:
+        results.append({
+            "term": key,
+            "definition": slang_dict[key],
+            "match_score": score
+        })
+    
+    return results
+
+def _fuzzy_match_food(location: str, food_items: list, threshold: int = 70) -> list:
+    """使用模糊匹配查找美食，支持对名称和区域的模糊搜索"""
+    if not food_items or not location:
+        return []
+    
+    location_lower = location.lower()
+    potential_matches = []
+    
+    for item in food_items:
+        # 检查区域匹配
+        area_text = item.get('校区/区域', '')
+        area_score = fuzz.partial_ratio(location_lower, area_text.lower())
+        
+        # 检查名称匹配
+        name_text = item.get('名称', '')
+        name_score = fuzz.partial_ratio(location_lower, name_text.lower())
+        
+        # 取最高分数
+        max_score = max(area_score, name_score)
+        
+        if max_score >= threshold:
+            potential_matches.append((item, max_score))
+    
+    # 按分数排序，分数高的在前
+    potential_matches.sort(key=lambda x: x[1], reverse=True)
+    
+    return [item for item, score in potential_matches]
+
+def _fuzzy_match_campus_info(topic: str, campus_dict: dict, threshold: int = 70) -> list:
+    """使用模糊匹配查找校园信息，支持递归搜索嵌套结构"""
+    # 调试打印语句
+    print(f"[调试] _fuzzy_match_campus_info 被调用")
+    print(f"[调试] 传入的 topic: '{topic}'")
+    print(f"[调试] campus_dict 的键: {list(campus_dict.keys())}")
+    
+    if not campus_dict:
+        print(f"[调试] campus_dict 为空，返回空列表")
+        return []
+    
+    results = []
+    
+    # 递归搜索函数
+    def recursive_search(current_dict, path=""):
+        """递归搜索嵌套字典结构"""
+        search_results = []
+        
+        for key, value in current_dict.items():
+            current_path = f"{path} > {key}" if path else key
+            
+            if isinstance(value, dict):
+                # 如果值是字典，递归搜索
+                nested_results = recursive_search(value, current_path)
+                search_results.extend(nested_results)
+                
+                # 同时也检查当前层级的key是否匹配
+                key_score = fuzz.token_set_ratio(topic.lower(), key.lower())
+                if key_score >= threshold:
+                    # 如果匹配的是一个分类，展示该分类下的所有内容
+                    category_info = f"分类\"{key}\"包含以下内容：\n{_format_nested_content(value, max_depth=3, current_depth=1)}"
+                    search_results.append({
+                        "topic": key,
+                        "info": category_info,
+                        "match_score": key_score,
+                        "path": current_path,
+                        "match_type": "category"
+                    })
+            
+            elif isinstance(value, str):
+                # 如果值是字符串，检查key和value的匹配
+                key_score = fuzz.token_set_ratio(topic.lower(), key.lower())
+                value_score = fuzz.token_set_ratio(topic.lower(), value.lower())
+                max_score = max(key_score, value_score)
+                
+                if max_score >= threshold:
+                    search_results.append({
+                        "topic": key,
+                        "info": value,
+                        "match_score": max_score,
+                        "path": current_path,
+                        "match_type": "content"
+                    })
+        
+        return search_results
+    
+    # 执行递归搜索
+    all_matches = recursive_search(campus_dict)
+    
+    print(f"[调试] 递归搜索找到的所有匹配: {len(all_matches)}")
+    for match in all_matches:
+        print(f"[调试] 匹配项: {match['topic']} (路径: {match['path']}, 分数: {match['match_score']}, 类型: {match['match_type']})")
+    
+    # 按分数排序，分数高的在前
+    all_matches.sort(key=lambda x: x["match_score"], reverse=True)
+    
+    # 过滤重复和低质量匹配
+    seen_paths = set()
+    for match in all_matches:
+        if match["path"] not in seen_paths and match["match_score"] >= threshold:
+            results.append(match)
+            seen_paths.add(match["path"])
+    
+    print(f"[调试] 经过阈值({threshold})过滤和去重后的结果数量: {len(results)}")
+    return results
+
+def _fuzzy_search_in_qa_pairs(query: str, qa_pairs: list, threshold: int = 70) -> list:
+    """在QA对中进行模糊搜索"""
+    if not qa_pairs:
+        return []
+    
+    results = []
+    for pair in qa_pairs:
+        question = pair.get("question", "")
+        answer = pair.get("answer", "")
+        
+        # 对问题进行模糊匹配
+        question_score = fuzz.partial_ratio(query.lower(), question.lower())
+        
+        if question_score >= threshold:
+            results.append({
+                "question": question,
+                "answer": answer,
+                "match_score": question_score,
+                "match_type": "question"
+            })
+    
+    # 按分数排序
+    results.sort(key=lambda x: x["match_score"], reverse=True)
+    return results
+
+def _fuzzy_search_in_general_info(query: str, general_info: dict, threshold: int = 70) -> list:
+    """在通用信息中进行模糊搜索"""
+    if not general_info:
+        return []
+    
+    results = []
+    for topic, info in general_info.items():
+        # 对主题和信息内容都进行模糊匹配
+        topic_score = fuzz.partial_ratio(query.lower(), topic.lower())
+        info_score = fuzz.partial_ratio(query.lower(), info.lower())
+        max_score = max(topic_score, info_score)
+        
+        if max_score >= threshold:
+            results.append({
+                "topic": topic,
+                "info": info,
+                "match_score": max_score,
+                "match_type": "topic" if topic_score > info_score else "content"
+            })
+    
+    # 按分数排序
+    results.sort(key=lambda x: x["match_score"], reverse=True)
+    return results
+
 # --- Initialization ---
 def load_all_data():
     """Loads all static and SHARED dynamic knowledge base data from files."""
@@ -117,45 +314,153 @@ def load_all_data():
 
 # --- Static Knowledge Query Functions (Return structured data) ---
 def get_slang_definition(term: str) -> dict:
-    definition = static_data_stores.get("slang", {}).get(term)
+    slang_dict = static_data_stores.get("slang", {})
+    
+    # 首先尝试精确匹配
+    definition = slang_dict.get(term)
     if definition:
-        return {"status": "success", "data": definition}
-    else:
-        return {"status": "not_found", "data": NOT_FOUND_STATIC_SLANG_MSG.format(term=term)}
+        return {"status": "success", "data": definition, "match_type": "exact"}
+    
+    # 如果精确匹配失败，尝试模糊匹配
+    fuzzy_matches = _fuzzy_match_slang(term, slang_dict)
+    if fuzzy_matches:
+        if len(fuzzy_matches) == 1:
+            # 只有一个匹配结果，直接返回
+            match = fuzzy_matches[0]
+            response = f"学姐没有找到\"{term}\"的精确定义，不过找到了相似的：\"{match['term']}\" - {match['definition']}（匹配度：{match['match_score']}%）"
+            return {"status": "success", "data": response, "match_type": "fuzzy", "fuzzy_matches": fuzzy_matches}
+        else:
+            # 多个匹配结果，列出所有可能的选项
+            response_parts = [f"学姐没有找到\"{term}\"的精确定义，不过找到了几个相似的选项："]
+            for i, match in enumerate(fuzzy_matches, 1):
+                response_parts.append(f"{i}. \"{match['term']}\" - {match['definition']}（匹配度：{match['match_score']}%）")
+            return {"status": "success", "data": "\n".join(response_parts), "match_type": "fuzzy", "fuzzy_matches": fuzzy_matches}
+    
+    # 完全没有找到匹配的结果
+    return {"status": "not_found", "data": NOT_FOUND_STATIC_SLANG_MSG.format(term=term)}
 
 def find_food(location: str, limit: int = 3) -> dict:
     all_food_items = static_data_stores.get("food", [])
     possible_matches = []
+    
     if location:
+        # 首先尝试精确匹配（原有逻辑）
         location_lower = location.lower()
         for item in all_food_items:
             if location_lower in item.get('校区/区域', '').lower() or \
                location_lower in item.get('名称', '').lower():
                 possible_matches.append(item)
+        
+        # 如果精确匹配没有结果，尝试模糊匹配
+        if not possible_matches:
+            possible_matches = _fuzzy_match_food(location, all_food_items, threshold=60)
+            if possible_matches:
+                # 添加模糊匹配的提示信息
+                fuzzy_note = f"（学姐使用模糊搜索为你找到了与\"{location}\"相关的美食）"
+            else:
+                return {"status": "not_found", "data": NOT_FOUND_STATIC_FOOD_MSG}
+        else:
+            fuzzy_note = ""
     else:
+        # 如果没有指定位置，随机选择一些
         possible_matches = random.sample(all_food_items, min(len(all_food_items), limit)) if all_food_items else []
+        fuzzy_note = ""
 
     if not possible_matches:
         return {"status": "not_found", "data": NOT_FOUND_STATIC_FOOD_MSG}
 
     selected_items = random.sample(possible_matches, min(len(possible_matches), limit))
-    if not selected_items: # Should be redundant if possible_matches is not empty, but good for safety
+    if not selected_items:
         return {"status": "not_found", "data": NOT_FOUND_STATIC_FOOD_MSG}
 
-    response_parts = [f"学姐为你找到了“{location if location else '一些'}”美食哦："]
+    response_parts = [f"学姐为你找到了\"{location if location else '一些'}\"美食哦：{fuzzy_note}"]
     for item in selected_items:
         response_parts.append(
             f"- {item.get('名称', '未知店铺')}: {item.get('简介', '暂无简介')} "
             f"(人均约: {item.get('人均消费', '未知')}, 标签: {', '.join(item.get('标签', ['暂无']))})"
         )
-    return {"status": "success", "data": "\n".join(response_parts)}
+    
+    match_type = "fuzzy" if fuzzy_note else "exact"
+    return {"status": "success", "data": "\n".join(response_parts), "match_type": match_type}
 
 def get_static_campus_info(topic: str) -> dict:
-    info = static_data_stores.get("campus_info", {}).get(topic)
-    if info:
-        return {"status": "success", "data": info}
-    else:
-        return {"status": "not_found", "data": NOT_FOUND_STATIC_CAMPUS_INFO_MSG.format(topic=topic)}
+    campus_dict = static_data_stores.get("campus_info", {})
+    
+    # 递归查找函数
+    def recursive_exact_search(current_dict, path=""):
+        """递归进行精确匹配搜索"""
+        for key, value in current_dict.items():
+            current_path = f"{path} > {key}" if path else key
+            
+            # 检查当前key是否精确匹配
+            if key == topic:
+                if isinstance(value, str):
+                    return {"found": True, "data": value, "path": current_path, "type": "content"}
+                elif isinstance(value, dict):
+                    # 如果匹配的是分类，展示分类内容
+                    category_info = f"分类\"{key}\"包含以下内容：\n{_format_nested_content(value, max_depth=3, current_depth=1)}"
+                    return {"found": True, "data": category_info, "path": current_path, "type": "category"}
+            
+            # 如果值是字典，递归搜索
+            if isinstance(value, dict):
+                result = recursive_exact_search(value, current_path)
+                if result["found"]:
+                    return result
+        
+        return {"found": False}
+    
+    # 首先尝试精确匹配（递归）
+    exact_result = recursive_exact_search(campus_dict)
+    if exact_result["found"]:
+        return {
+            "status": "success", 
+            "data": exact_result["data"], 
+            "match_type": "exact",
+            "path": exact_result["path"],
+            "content_type": exact_result["type"]
+        }
+    
+    # 如果精确匹配失败，尝试模糊匹配
+    fuzzy_matches = _fuzzy_match_campus_info(topic, campus_dict)
+    if fuzzy_matches:
+        if len(fuzzy_matches) == 1:
+            # 只有一个匹配结果，直接返回
+            match = fuzzy_matches[0]
+            if match["path"] != match["topic"]:
+                # 有路径信息，说明是嵌套结构
+                response = f"学姐没有找到\"{topic}\"的精确信息，不过在路径「{match['path']}」下找到了相似的内容：\n\n{match['info']}（匹配度：{match['match_score']}%）"
+            else:
+                # 顶层匹配
+                response = f"学姐没有找到\"{topic}\"的精确信息，不过找到了相似的：\n\n关于\"{match['topic']}\"：{match['info']}（匹配度：{match['match_score']}%）"
+            
+            return {
+                "status": "success", 
+                "data": response, 
+                "match_type": "fuzzy", 
+                "fuzzy_matches": fuzzy_matches,
+                "path": match["path"],
+                "content_type": match["match_type"]
+            }
+        else:
+            # 多个匹配结果，列出所有可能的选项
+            response_parts = [f"学姐没有找到\"{topic}\"的精确信息，不过找到了几个相似的选项：\n"]
+            for i, match in enumerate(fuzzy_matches, 1):
+                if match["path"] != match["topic"]:
+                    # 有路径信息
+                    response_parts.append(f"{i}. 在路径「{match['path']}」：{match['info']}（匹配度：{match['match_score']}%）")
+                else:
+                    # 顶层匹配
+                    response_parts.append(f"{i}. 关于\"{match['topic']}\"：{match['info']}（匹配度：{match['match_score']}%）")
+            
+            return {
+                "status": "success", 
+                "data": "\n".join(response_parts), 
+                "match_type": "fuzzy", 
+                "fuzzy_matches": fuzzy_matches
+            }
+    
+    # 完全没有找到匹配的结果
+    return {"status": "not_found", "data": NOT_FOUND_STATIC_CAMPUS_INFO_MSG.format(topic=topic)}
 
 
 # --- Personal Knowledge Base Helper Functions ---
@@ -294,40 +599,98 @@ def get_all_entries_from_personal_kbs_by_category(target_personal_category: str)
 # --- Unified Dynamic Knowledge Search Function (Return structured data) ---
 def search_learned_info(user_id: str, category_to_search: str, query_text: str) -> dict:
     personal_found_answer_data = None
+    personal_fuzzy_matches = []
+    
     if user_id and category_to_search in SUPPORTED_PERSONAL_CATEGORIES:
         personal_kb_category_data = _load_or_initialize_personal_kb_category(user_id, category_to_search)
         if personal_kb_category_data:
             query_lower = query_text.lower()
+            
+            # 首先尝试精确匹配
             for pair in personal_kb_category_data.get("qa_pairs", []):
                 if query_lower in pair.get("question", "").lower():
                     personal_found_answer_data = pair.get("answer")
                     break
+            
             if not personal_found_answer_data:
                 for topic, info in personal_kb_category_data.get("general_info", {}).items():
                     if query_lower in topic.lower() or query_lower in info.lower():
-                        personal_found_answer_data = f"关于“{topic}”（在你的“{category_to_search}”个人笔记里），我学到的是：“{info}”"
+                        personal_found_answer_data = f"关于\"{topic}\"（在你的\"{category_to_search}\"个人笔记里），我学到的是：\"{info}\""
                         break
+            
+            # 如果精确匹配失败，尝试模糊匹配
+            if not personal_found_answer_data:
+                # 在QA对中进行模糊搜索
+                qa_fuzzy_results = _fuzzy_search_in_qa_pairs(query_text, personal_kb_category_data.get("qa_pairs", []), threshold=60)
+                if qa_fuzzy_results:
+                    best_match = qa_fuzzy_results[0]
+                    personal_found_answer_data = f"学姐在你的个人笔记里没找到精确匹配，不过找到了相似的问题：\n\n问：{best_match['question']}（匹配度：{best_match['match_score']}%）\n答：{best_match['answer']}"
+                    personal_fuzzy_matches = qa_fuzzy_results
+                
+                # 如果QA对中没有找到，在通用信息中搜索
+                if not personal_found_answer_data:
+                    info_fuzzy_results = _fuzzy_search_in_general_info(query_text, personal_kb_category_data.get("general_info", {}), threshold=60)
+                    if info_fuzzy_results:
+                        best_match = info_fuzzy_results[0]
+                        personal_found_answer_data = f"学姐在你的个人笔记里找到了相似的信息：\n\n关于\"{best_match['topic']}\"（匹配度：{best_match['match_score']}%）：{best_match['info']}"
+                        personal_fuzzy_matches = info_fuzzy_results
+        
         if personal_found_answer_data:
             print(f"[动态查询] 在用户 '{user_id}' 的个人 '{category_to_search}' 知识中找到。")
-            return {"status": "success", "data": personal_found_answer_data, "source": "personal_kb"}
+            result = {"status": "success", "data": personal_found_answer_data, "source": "personal_kb"}
+            if personal_fuzzy_matches:
+                result["match_type"] = "fuzzy"
+                result["fuzzy_matches"] = personal_fuzzy_matches
+            else:
+                result["match_type"] = "exact"
+            return result
 
     shared_found_answer_data = None
+    shared_fuzzy_matches = []
+    
     if category_to_search in SUPPORTED_SHARED_DYNAMIC_CATEGORIES:
         shared_category_kb = shared_dynamic_kbs_data.get(category_to_search)
         if shared_category_kb:
             query_lower = query_text.lower()
+            
+            # 首先尝试精确匹配
             for pair in shared_category_kb.get("qa_pairs", []):
                 if query_lower in pair.get("question", "").lower():
                     shared_found_answer_data = pair.get("answer")
                     break
+            
             if not shared_found_answer_data:
                 for topic, info in shared_category_kb.get("general_info", {}).items():
                     if query_lower in topic.lower() or query_lower in info.lower():
-                        shared_found_answer_data = f"关于“{topic}”（在共享的“{category_to_search}”知识里），学姐了解到的是：“{info}”"
+                        shared_found_answer_data = f"关于\"{topic}\"（在共享的\"{category_to_search}\"知识里），学姐了解到的是：\"{info}\""
                         break
+            
+            # 如果精确匹配失败，尝试模糊匹配
+            if not shared_found_answer_data:
+                # 在QA对中进行模糊搜索
+                qa_fuzzy_results = _fuzzy_search_in_qa_pairs(query_text, shared_category_kb.get("qa_pairs", []), threshold=60)
+                if qa_fuzzy_results:
+                    best_match = qa_fuzzy_results[0]
+                    shared_found_answer_data = f"学姐在共享知识里没找到精确匹配，不过找到了相似的问题：\n\n问：{best_match['question']}（匹配度：{best_match['match_score']}%）\n答：{best_match['answer']}"
+                    shared_fuzzy_matches = qa_fuzzy_results
+                
+                # 如果QA对中没有找到，在通用信息中搜索
+                if not shared_found_answer_data:
+                    info_fuzzy_results = _fuzzy_search_in_general_info(query_text, shared_category_kb.get("general_info", {}), threshold=60)
+                    if info_fuzzy_results:
+                        best_match = info_fuzzy_results[0]
+                        shared_found_answer_data = f"学姐在共享知识里找到了相似的信息：\n\n关于\"{best_match['topic']}\"（匹配度：{best_match['match_score']}%）：{best_match['info']}"
+                        shared_fuzzy_matches = info_fuzzy_results
+        
         if shared_found_answer_data:
             print(f"[动态查询] 在共享 '{category_to_search}' 知识中找到。")
-            return {"status": "success", "data": shared_found_answer_data, "source": "shared_kb"}
+            result = {"status": "success", "data": shared_found_answer_data, "source": "shared_kb"}
+            if shared_fuzzy_matches:
+                result["match_type"] = "fuzzy"
+                result["fuzzy_matches"] = shared_fuzzy_matches
+            else:
+                result["match_type"] = "exact"
+            return result
 
     # Not found in either, or category was invalid for one of them
     is_valid_personal_cat = category_to_search in SUPPORTED_PERSONAL_CATEGORIES
@@ -344,7 +707,7 @@ def search_learned_info(user_id: str, category_to_search: str, query_text: str) 
         return {"status": "not_found", "data": NOT_FOUND_SHARED_DYNAMIC_INFO_MSG.format(query=query_text) + f" (在共享的 '{category_to_search}' 笔记里)", "source": "none"}
     else:
         # Category was not valid for any dynamic search
-        msg = f"学姐不太确定“{category_to_search}”类别里有没有可以学习或查询的笔记呢。你可以试试这些类别：个人笔记({SUPPORTED_PERSONAL_CATEGORIES})，共享知识({SUPPORTED_SHARED_DYNAMIC_CATEGORIES})。或者直接教我一些新东西吧！"
+        msg = f"学姐不太确定\"{category_to_search}\"类别里有没有可以学习或查询的笔记呢。你可以试试这些类别：个人笔记({SUPPORTED_PERSONAL_CATEGORIES})，共享知识({SUPPORTED_SHARED_DYNAMIC_CATEGORIES})。或者直接教我一些新东西吧！"
         return {"status": "error", "data": msg, "reason": "invalid_category_for_dynamic_search"}
 
 
