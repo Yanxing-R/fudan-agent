@@ -12,8 +12,6 @@ conda-bld/
 # Log files
 *.log
 flask_app.log
-access.log
-error.log
 
 # JSON files
 *.json
